@@ -1,0 +1,131 @@
+<!doctype html>
+<html>
+  <body>
+    <h3>Bus Speed Tracker</h3>
+    <pre id="out">Starting...</pre>
+
+    <script>
+
+      const BACKEND = "https://bus-speed-backend.vercel.app";
+const BUS_ID = "691978294f5541d466eaa7e0";
+
+
+
+      const out = document.getElementById("out");
+
+      // Keep last point to compute speed when coords.speed is null
+      let last = null;
+
+      // Rolling average smoothing (last N speed samples)
+      const speeds = [];
+      const N = 5;
+
+      function toRad(d) { return (d * Math.PI) / 180; }
+
+      // Haversine distance in meters
+      function distanceMeters(lat1, lon1, lat2, lon2) {
+        const R = 6371000;
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+        const a =
+          Math.sin(dLat / 2) ** 2 +
+          Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+          Math.sin(dLon / 2) ** 2;
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return R * c;
+      }
+
+      function smooth(v) {
+        speeds.push(v);
+        if (speeds.length > N) speeds.shift();
+        return speeds.reduce((a, b) => a + b, 0) / speeds.length;
+      }
+
+      function mpsToKmh(mps) { return mps * 3.6; }
+
+      function start() {
+        if (!("geolocation" in navigator)) {
+          out.textContent = "Geolocation not supported.";
+          return;
+        }
+
+        navigator.geolocation.watchPosition(
+          (pos) => {
+            const { latitude, longitude, speed, heading, accuracy } = pos.coords;
+            const ts = pos.timestamp; // ms
+
+            // Ignore very inaccurate readings (tweak threshold as needed)
+            if (accuracy != null && accuracy > 30) {
+              out.textContent = `Waiting for better GPS accuracy...\naccuracy: ${accuracy.toFixed(1)}m`;
+              return;
+            }
+
+            let speedMps = null;
+
+            // 1) Use native GPS speed if available
+            if (speed != null && Number.isFinite(speed)) {
+              speedMps = speed;
+            } else if (last) {
+              // 2) Fallback: compute speed from distance/time
+              const dt = (ts - last.ts) / 1000; // seconds
+              if (dt > 0.5) {
+                const d = distanceMeters(last.lat, last.lng, latitude, longitude);
+                speedMps = d / dt;
+              }
+            }
+
+            // Save last point
+            last = { lat: latitude, lng: longitude, ts };
+
+            if (speedMps == null) {
+              out.textContent = `Getting speed...\nlat: ${latitude}\nlng: ${longitude}\naccuracy: ${accuracy}m`;
+              return;
+            }
+
+            // Clamp unrealistic spikes (optional)
+            if (speedMps < 0) speedMps = 0;
+            if (speedMps > 60) speedMps = 60; // 216 km/h cap, just in case
+
+            const speedKmh = mpsToKmh(speedMps);
+            const smoothKmh = mpsToKmh(smooth(speedMps));
+
+            fetch(`${BACKEND}/api/telemetry`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                busId: BUS_ID,
+                ts: Date.now(),
+                lat: latitude,
+                lng: longitude,
+                //speedKmh: Number(smoothKmh.toFixed(1)),
+                speedKmh: 70,
+                accuracyM: accuracy,
+                heading: heading ?? null
+              })
+            }).catch(() => {});
+
+
+            out.textContent =
+              `lat: ${latitude.toFixed(6)}\n` +
+              `lng: ${longitude.toFixed(6)}\n` +
+              `accuracy: ${accuracy?.toFixed(1)}m\n` +
+              `speed: ${speedKmh.toFixed(1)} km/h\n` +
+              `smooth: ${smoothKmh.toFixed(1)} km/h\n` +
+              `heading: ${heading ?? "n/a"}\n` +
+              `time: ${new Date(ts).toLocaleTimeString()}`;
+          },
+          (err) => {
+            out.textContent = `GPS error: ${err.code} ${err.message}\n\nTip: enable Location, set to High accuracy, allow permission.`;
+          },
+          {
+            enableHighAccuracy: true,
+            maximumAge: 0,
+            timeout: 10000,
+          }
+        );
+      }
+
+      start();
+    </script>
+  </body>
+</html>
